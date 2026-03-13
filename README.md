@@ -164,20 +164,53 @@ or
 
 
 
-# GNN
-Use when we have large complex data. GNN learns features and tasks simultaneously using message passing. Every node "talks" to its neighbors to update its own representation. If node A is connected to node B, node A's feature vector $h_A$ is updated using $h_B$. 
 
+# Geometric graphs
+A geometric graph is defined as $\vec{\mathcal{G}}(A, H, \vec{X})$, where $A \in [0,1]^{N \times N}$ is the adjacency matrix, $H \in \mathbb{R}^{N \times C_h}$ is the node feature matrix, and $X \in \mathbb{R}^{N \times 3}$ are the 3D coordinates of all nodes.
+In a standard graph, the data lives purely in a **topological space**. The primary information is relational (who is connected to whom), and the model only needs to care about the graph's connectivity structure and abstract node/edge features.
+
+In a geometric graph (such as a 3D molecule, a point cloud, or an N-body physics system), nodes also possess **spatial coordinates** in a Euclidean space (e.g., $\mathbb{R}^3$). The paradigm shift is that the network must now respect the physical laws and symmetries of that space. It is no longer enough to just know that two nodes are connected; the model must understand their spatial relationship while strictly adhering to the laws of physics—specifically, Euclidean symmetries $E(n)$ or $SE(n)$.
+
+Here is how these symmetries are encoded and how the embedding architectures adapt to this shift.
+### 1. Encoding Symmetries: Permutation, Translation, and Orthogonal Transformations
+When building models for geometric graphs, the architecture must encode specific symmetries as either **invariant** (the output does not change when the input transforms) or **equivariant** (the output transforms in the exact same mathematical way as the input).
+- **Permutation:** Changing the order of the nodes in the input matrix should not change the graph's output.
+    - _How it is encoded:_ Just like in standard GNNs, permutation invariance is achieved by using symmetric aggregation functions (like `sum`, `mean`, or `max`) when pooling messages from neighboring nodes.
+- **Translation:** Shifting the entire graph in space (e.g., moving a molecule 5 units to the right) should not change its scalar properties (like energy) or its internal relative structure.
+    - _How it is encoded:_ Instead of feeding absolute coordinates $x_i$ into the neural network, the architecture uses **relative displacement vectors** ($x_i - x_j$). If the whole system is translated by a vector $c$, the shift cancels out: $(x_i + c) - (x_j + c) = x_i - x_j$.
+- **Orthogonal Transformation (Rotation and Reflection):** Rotating a geometric graph in 3D space should not alter invariant properties (like the type of molecule) but must strictly rotate equivariant properties (like atomic forces or velocity vectors) by the exact same rotation matrix.
+    - _How it is encoded (Invariant):_ To make the model blindly invariant to rotations, the architecture computes the $L_2$ norm (Euclidean distance) of the relative vectors: $||x_i - x_j||^2$. Distances do not change when an object is rotated.
+    - _How it is encoded (Equivariant):_ To make the model equivariant, the architecture performs scalar multiplications on the relative displacement vectors. Since scalars are invariant to rotation, multiplying a relative vector by a learned scalar preserves the vector's rotational direction.
+### 2. How the Embedding Architecture Differs
+Standard GNNs (like GCNs or GraphSAGE) only update hidden feature vectors $h_i$ (representing semantic information like atom type or charge). Geometric GNNs must handle both the hidden features $h_i$ and the geometric coordinates $x_i$.
+This leads to two primary types of geometric architectures:
+#### A. Invariant Graph Neural Networks (e.g., SchNet)
+These architectures only output invariant embeddings. They discard the directional information of the coordinates and rely purely on distances.
+- **Message Passing:** The message from node $j$ to node $i$ is a function of their hidden states and the **distance** between them.
+    $$m_{ij} = \phi_m(h_i, h_j, ||x_i - x_j||)$$
+- **Update:** The hidden state is updated based on the aggregated messages. The coordinates $x_i$ are never updated.
+    $$h_i' = \phi_h(h_i, \sum_{j} m_{ij})$$
+- _Limitation:_ Because they only use distances, they cannot distinguish between certain chiral structures (mirror images) or complex angular geometries.
+#### B. Equivariant Graph Neural Networks (e.g., EGNN)
+These architectures maintain two parallel streams of embeddings: one for invariant node features ($h_i$) and one for equivariant coordinate vectors ($x_i$). As the network gets deeper, it continuously updates both the features and the physical structure.
+- **Message Passing:** The message is computed using the hidden features and the squared distance.
+    $$m_{ij} = \phi_e(h_i, h_j, ||x_i - x_j||^2)$$
+- **Coordinate Update (Equivariant Stream):** The model predicts a force or shift for the coordinates by applying a learned scalar function $\phi_x$ to the invariant message, and multiplying it by the direction vector $(x_i - x_j)$.
+    $$x_i' = x_i + \sum_{j} (x_i - x_j) \phi_x(m_{ij})$$
+    Because $(x_i - x_j)$ rotates equivariantly and $\phi_x(m_{ij})$ is a rotation-invariant scalar, the entire update is mathematically guaranteed to be $E(n)$ equivariant.
+- **Feature Update (Invariant Stream):** The hidden features are updated just like a standard GNN, but informed by the geometric messages.
+    $$h_i' = \phi_h(h_i, \sum_{j} m_{ij})$$
 # Papers
 ## A Comprehensive Survey of **Graph Embedding**: Problems, Techniques, and Applications 
 HongYun Cai , Vincent W. Zheng , and Kevin Chen-Chuan Chang, 2017, IEEE
 ### 1. Methods of Graph Embeddings
 Graph embedding techniques map graph data into low-dimensional spaces while preserving structural and property information. The main methods include:
-- **Matrix Factorization:** Represents graph characteristics (like node proximity or Laplacian matrices) as a matrix and factorizes it to obtain low-dimensional embeddings. Use when the adjacency matrix $W \notin [0,1]^{m \times m}$, i.e., edges have non-binary weights. 
+- **Matrix Factorization:** Use when the adjacency matrix $W \notin [0,1]^{m \times m}$, i.e., edges have non-binary weights. Example usage: graph constructed from non-relational data by encoding the pairwise relations between instances.
 	- *Graph laplacian eigenmap*
 	$\{ x_i \}_{i=1}^m \subset \mathbb{R}^n$  and its embeddings $\{ z_i \}_{i=1}^m \subset \mathbb{R}^d$ with $d << n$ . Consider $z_i = A x_i$, $$A^* = \text{argmin} \sum_{i,j} ||Ax_i - Ax_j||^2 W_{ij} = \text{argmin } 2 \text{ tr}(A(XLX^\top)A^\top)$$ subject to $A(XDX^\top)A^\top = I$.  Or, simplifies to $\text{argmin } tr(A(XWX^\top)A^\top)$ subject to $A(XDX^\top)A^\top = I$. $$A^* = \begin{bmatrix} v_1^\top \\ v_2^\top \\ . \\ . \\ v_d^\top \end{bmatrix}$$ with $v_1, v_2, \cdots, v_n$ being eigenvectors corresponding to $\lambda_1 \leq \lambda_2 \leq \cdots \lambda_n$ of this generalized eigenvalue equation: $(XWX^\top)v_i = \lambda_i (XDX^\top)v_i$.
 	- *Node proximity*
 	$W \approx Y (Y^c)^\top$. Find rank $d$ decomposition of $W$ (use SVD).  
-	```python
+```python
 # Solve the generalized eigenvalue problem M1 * v = lambda * M2 * v 
 # scipy's eigh returns eigenvalues in ascending order (lambda_1 <= lambda_2 <= ...) 
 eigenvalues, eigenvectors = scipy.linalg.eigh(M1, M2)
@@ -190,66 +223,384 @@ idx = np.argsort(Sigma)[::-1]
 U = U[:, idx] 
 Sigma = Sigma[idx]
 embeddings = U @ np.diag(np.sqrt(Sigma)) # (m, d)
-	```
+```
 - **Deep Learning:** Utilizes neural networks to encode graph structures.
 	- random walks (to sample paths and learn context like *DeepWalk*, *node2vec*, *metapath2vec*)
-	```python
-import networkx as nx
-from karateclub import Node2Vec, DeepWalk
-
-G = nx.karate_club_graph()
-
+```python
 # 1. DeepWalk
-dw_model = DeepWalk(walk_number=10, walk_length=80, dimensions=64)
-dw_model.fit(G)
-deepwalk_embeddings = dw_model.get_embedding()
-
-# 2. Node2Vec
-n2v_model = Node2Vec(walk_number=10, walk_length=80, p=1.0, q=1.0, dimensions=64)
-n2v_model.fit(G)
-node2vec_embeddings = n2v_model.get_embedding()
-
-print("DeepWalk embedding shape:", deepwalk_embeddings.shape)
-	```
-	- without random walks (such as *SDNE* (autoencoder), *GCN*, *GNN*)
-	```python
-import torch
-import torch.nn.functional as F
-from torch_geometric.nn import GCNConv
-from torch_geometric.datasets import Planetoid
-
-# Load standard Cora dataset
-dataset = Planetoid(root='/tmp/Cora', name='Cora')
-data = dataset[0]
-
-# Define a 2-layer Graph Convolutional Network (GCN)
-class GCN(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = GCNConv(dataset.num_node_features, 16)
-        self.conv2 = GCNConv(16, dataset.num_classes)
-
-    def forward(self, data):
-        x, edge_index = data.x, data.edge_index
+class DeepWalk:
+    def __init__(self, graph, embedding_dim=128, walk_length=80, num_walks=10, window_size=5):
+        """
+        graph: dict of adjacency lists {node: [neighbors]}
+        """
+        self.graph = graph
+        self.embedding_dim = embedding_dim
+        self.walk_length = walk_length
+        self.num_walks = num_walks
+        self.window_size = window_size
+        self.embeddings = None
+    
+    def random_walk(self, start_node):
+        walk = [start_node]
+        for _ in range(self.walk_length - 1):
+            current = walk[-1]
+            neighbors = self.graph.get(current, [])
+            if len(neighbors) == 0:
+                break
+            walk.append(random.choice(neighbors))
+        return walk
+    
+    def generate_walks(self):
+        walks = []
+        nodes = list(self.graph.keys())
+        for _ in range(self.num_walks):
+            random.shuffle(nodes)
+            for node in nodes:
+                walks.append(self.random_walk(node))
+        return walks
+    
+    def train(self, lr=0.025, epochs=1):
+        walks = self.generate_walks()
+        num_nodes = len(self.graph)
         
-        # First GCN layer + ReLU + Dropout
-        x = self.conv1(x, edge_index)
-        x = F.relu(x)
-        x = F.dropout(x, training=self.training)
+        # Initialize embeddings
+        self.embeddings = np.random.randn(num_nodes, self.embedding_dim) * 0.01
         
-        # Second GCN layer to output classes/embeddings
-        x = self.conv2(x, edge_index)
-        return F.log_softmax(x, dim=1)
+        # Simple Skip-gram implementation
+        for epoch in range(epochs):
+            for walk in walks:
+                for i, node in enumerate(walk):
+                    # Get context window
+                    start = max(0, i - self.window_size)
+                    end = min(len(walk), i + self.window_size + 1)
+                    
+                    for j in range(start, end):
+                        if i != j:
+                            context_node = walk[j]
+                            # Update embeddings (simplified)
+                            self.embeddings[node] += lr * self.embeddings[context_node]
+        
+        return self.embeddings
 
-model = GCN()
-out = model(data)
-print("Output shape (Nodes x Classes):", out.shape)
-	```
+
+# 2. node2vec
+class Node2Vec:
+    def __init__(self, graph, embedding_dim=128, walk_length=80, num_walks=10, 
+                 p=1.0, q=1.0, window_size=5):
+        """
+        graph: dict of adjacency lists {node: [neighbors]}
+        p: return parameter (controls likelihood of returning to previous node)
+        q: in-out parameter (controls BFS vs DFS)
+        """
+        self.graph = graph
+        self.embedding_dim = embedding_dim
+        self.walk_length = walk_length
+        self.num_walks = num_walks
+        self.p = p
+        self.q = q
+        self.window_size = window_size
+        self.embeddings = None
+    
+    def get_alias_nodes(self, node):
+        """Precompute transition probabilities for neighbors"""
+        neighbors = self.graph.get(node, [])
+        if len(neighbors) == 0:
+            return [], []
+        
+        unnormalized_probs = [1.0] * len(neighbors)
+        norm_const = sum(unnormalized_probs)
+        normalized_probs = [p / norm_const for p in unnormalized_probs]
+        
+        return neighbors, normalized_probs
+    
+    def biased_random_walk(self, start_node):
+        walk = [start_node]
+        
+        for _ in range(self.walk_length - 1):
+            current = walk[-1]
+            neighbors = self.graph.get(current, [])
+            
+            if len(neighbors) == 0:
+                break
+            
+            if len(walk) == 1:
+                # First step: uniform random
+                walk.append(random.choice(neighbors))
+            else:
+                prev = walk[-2]
+                probs = []
+                
+                for neighbor in neighbors:
+                    if neighbor == prev:
+                        # Return to previous node
+                        probs.append(1.0 / self.p)
+                    elif neighbor in self.graph.get(prev, []):
+                        # Neighbor of previous node (BFS)
+                        probs.append(1.0)
+                    else:
+                        # Not connected to previous node (DFS)
+                        probs.append(1.0 / self.q)
+                
+                # Normalize and sample
+                probs = np.array(probs)
+                probs = probs / probs.sum()
+                next_node = np.random.choice(neighbors, p=probs)
+                walk.append(next_node)
+        
+        return walk
+    
+    def generate_walks(self):
+        walks = []
+        nodes = list(self.graph.keys())
+        for _ in range(self.num_walks):
+            random.shuffle(nodes)
+            for node in nodes:
+                walks.append(self.biased_random_walk(node))
+        return walks
+    
+    def train(self, lr=0.025, epochs=1):
+        walks = self.generate_walks()
+        num_nodes = len(self.graph)
+        
+        # Initialize embeddings
+        self.embeddings = np.random.randn(num_nodes, self.embedding_dim) * 0.01
+        
+        # Simple Skip-gram implementation
+        for epoch in range(epochs):
+            for walk in walks:
+                for i, node in enumerate(walk):
+                    start = max(0, i - self.window_size)
+                    end = min(len(walk), i + self.window_size + 1)
+                    
+                    for j in range(start, end):
+                        if i != j:
+                            context_node = walk[j]
+                            self.embeddings[node] += lr * self.embeddings[context_node]
+        
+        return self.embeddings
+
+
+# 3. metapath2vec
+class MetaPath2Vec:
+    def __init__(self, graph, node_types, metapath, embedding_dim=128, 
+                 walk_length=100, num_walks=10, window_size=5):
+        """
+        graph: dict of adjacency lists {node: [neighbors]}
+        node_types: dict mapping {node: type}
+        metapath: list of node types defining the meta-path, e.g., ['Author', 'Paper', 'Author']
+        """
+        self.graph = graph
+        self.node_types = node_types
+        self.metapath = metapath
+        self.embedding_dim = embedding_dim
+        self.walk_length = walk_length
+        self.num_walks = num_walks
+        self.window_size = window_size
+        self.embeddings = None
+    
+    def metapath_random_walk(self, start_node):
+        walk = [start_node]
+        
+        for step in range(self.walk_length - 1):
+            current = walk[-1]
+            # Determine expected next node type based on meta-path
+            next_type_idx = (step + 1) % len(self.metapath)
+            expected_type = self.metapath[next_type_idx]
+            
+            # Get neighbors of the expected type
+            neighbors = self.graph.get(current, [])
+            valid_neighbors = [n for n in neighbors if self.node_types.get(n) == expected_type]
+            
+            if len(valid_neighbors) == 0:
+                break
+            
+            walk.append(random.choice(valid_neighbors))
+        
+        return walk
+    
+    def generate_walks(self):
+        walks = []
+        # Only start from nodes matching the first type in meta-path
+        start_type = self.metapath[0]
+        start_nodes = [n for n, t in self.node_types.items() if t == start_type]
+        
+        for _ in range(self.num_walks):
+            random.shuffle(start_nodes)
+            for node in start_nodes:
+                walks.append(self.metapath_random_walk(node))
+        
+        return walks
+    
+    def train(self, lr=0.025, epochs=1):
+        walks = self.generate_walks()
+        num_nodes = len(self.graph)
+        
+        # Initialize embeddings
+        self.embeddings = np.random.randn(num_nodes, self.embedding_dim) * 0.01
+        
+        # Simple Skip-gram implementation
+        for epoch in range(epochs):
+            for walk in walks:
+                for i, node in enumerate(walk):
+                    start = max(0, i - self.window_size)
+                    end = min(len(walk), i + self.window_size + 1)
+                    
+                    for j in range(start, end):
+                        if i != j:
+                            context_node = walk[j]
+                            self.embeddings[node] += lr * self.embeddings[context_node]
+        
+        return self.embeddings
+```
+
+- without random walks (such as *SDNE* (autoencoder), *GCN*, *GraphSAGE*, *GNN*)
+```python
+# 1. SDNE (Structural Deep Network Embedding)
+class SDNE(nn.Module):
+    def __init__(self, input_dim, hidden_dims=[256, 128]):
+        super(SDNE, self).__init__()
+        # Encoder layers
+        self.encoder1 = nn.Linear(input_dim, hidden_dims[0])
+        self.encoder2 = nn.Linear(hidden_dims[0], hidden_dims[1])
+        
+        # Decoder layers
+        self.decoder1 = nn.Linear(hidden_dims[1], hidden_dims[0])
+        self.decoder2 = nn.Linear(hidden_dims[0], input_dim)
+    
+    def encode(self, adj_matrix):
+        x = F.relu(self.encoder1(adj_matrix))
+        embedding = F.relu(self.encoder2(x))
+        return embedding
+    
+    def decode(self, embedding):
+        x = F.relu(self.decoder1(embedding))
+        reconstruction = self.decoder2(x)
+        return reconstruction
+    
+    def forward(self, adj_matrix):
+        embedding = self.encode(adj_matrix)
+        reconstruction = self.decode(embedding)
+        return embedding, reconstruction
+
+
+# 2. GCN (Graph Convolutional Network)
+class GCN(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(GCN, self).__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+    
+    def forward(self, node_features, adj_matrix):
+        # Normalize adjacency matrix: D^(-1/2) * A * D^(-1/2)
+        deg = adj_matrix.sum(dim=1)
+        deg_inv_sqrt = torch.pow(deg, -0.5)
+        deg_inv_sqrt[torch.isinf(deg_inv_sqrt)] = 0.0
+        norm_adj = deg_inv_sqrt.view(-1, 1) * adj_matrix * deg_inv_sqrt.view(1, -1)
+        
+        # First layer
+        x = torch.mm(norm_adj, node_features)
+        x = F.relu(self.fc1(x))
+        
+        # Second layer
+        x = torch.mm(norm_adj, x)
+        x = self.fc2(x)
+        return x
+
+
+# 3. Generic GNN (Message Passing Neural Network)
+class GNN(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(GNN, self).__init__()
+        self.message_fc = nn.Linear(input_dim, hidden_dim)
+        self.update_fc = nn.Linear(input_dim + hidden_dim, hidden_dim)
+        self.output_fc = nn.Linear(hidden_dim, output_dim)
+    
+    def forward(self, node_features, edge_index):
+        # edge_index: [2, num_edges] tensor with source and target nodes
+        num_nodes = node_features.size(0)
+        
+        # Message passing
+        src_nodes, dst_nodes = edge_index[0], edge_index[1]
+        messages = self.message_fc(node_features[src_nodes])
+        
+        # Aggregate messages by destination node
+        aggregated = torch.zeros(num_nodes, messages.size(1), device=node_features.device)
+        aggregated.index_add_(0, dst_nodes, messages)
+        
+        # Update node representations
+        combined = torch.cat([node_features, aggregated], dim=1)
+        x = F.relu(self.update_fc(combined))
+        x = self.output_fc(x)
+        return x
+
+# 4. GraphSAGE
+class GraphSAGE(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(GraphSAGE, self).__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+        
+    def forward(self, node_features, sampled_neighbors):
+        aggregated = torch.mean(node_features[sampled_neighbors], dim=1)
+        x = F.relu(self.fc1(aggregated))
+        x = self.fc2(x)
+        return x
+        
+# USAGE
+input_dim = 5
+hidden_dim = 16
+output_dim = 2
+model = GraphSAGE(input_dim, hidden_dim, output_dim)
+
+## Setting up loss functions and optimization algorithms
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+## training
+for epoch in range(num_epochs):
+    loss_accumulated = 0.0
+    for node in G.nodes():
+        for _ in range(num_samples):
+            # Randomly sampled adjacent nodes
+            sampled_neighbors = random.sample(list(G.neighbors(node)), num_neighbors)
+            sampled_neighbors = torch.tensor(sampled_neighbors)
+            
+            # forward pass
+            logits = model(torch.tensor(node_features[node], dtype=torch.float32),
+                           sampled_neighbors)
+            
+            # Loss Calculation
+            loss = criterion(logits.view(1, -1), torch.tensor([labels[node]], dtype=torch.long))
+            loss_accumulated += loss.item()
+            
+            # back-propagation
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+    
+    print(f"Epoch [{epoch+1}/{num_epochs}] Loss: {loss_accumulated}")
+
+## inference
+predicted_labels = []
+true_labels = []
+for node in G.nodes():
+    sampled_neighbors = list(G.neighbors(node))
+    logits = model(torch.tensor(node_features[node], dtype=torch.float32), sampled_neighbors)
+    predicted_label = torch.argmax(logits).item()
+    true_label = labels[node][0]
+    predicted_labels.append(predicted_label)
+    true_labels.append(true_label)
+
+## Accuracy Rating
+accuracy = accuracy_score(true_labels, predicted_labels)
+print(f"Accuracy: {accuracy}")
+	
+```
 - **Edge Reconstruction:** Learns embeddings by optimizing objective functions that preserve edge connections.
 	- maximizing the probability of reconstructing an edge
 	- minimizing distance-based loss
 	- margin-based ranking losses (Knowledge graph)
-	```python
+```python
 from pykeen.pipeline import pipeline
 
 # Run a pipeline to train TransE (minimizing distance/margin-based loss) 
@@ -264,7 +615,7 @@ result = pipeline(
 # Extract entity and relation embeddings
 entity_embeddings = result.model.entity_representations[0](indices=None)
 print("Entity embeddings tensor shape:", entity_embeddings.shape)
-	```
+```
 - **Graph Kernels:** Decomposes graphs into atomic substructures (such as graphlets, subtree patterns, or random walks) and uses kernel functions to measure the similarity between these substructures.
 	- Graphlet
 	- Weisfeiler-Lehman subtree
@@ -289,3 +640,8 @@ When multiple methods can be applied to a specific problem, their strengths and 
 
 ## A survey of geometric graph neural networks: data structures, models and applications 
 Jiaqi HAN, Jiacheng CEN
+### E(n) Equivariant Graph Neural Networks
+To forecast the positions of the particles at a future time step ($t + \Delta t$), the network must shift the coordinates. The researchers modified the standard coordinate update equation by adding a specific velocity term:
+
+$$x_i^{l+1} = x_i^l + \underbrace{\sum_{j \neq i} (x_i^l - x_j^l) \phi_x(m_{ij})}_{\text{Force/Interaction Shift}} + \underbrace{v_i \phi_v(h_i^l)}_{\text{Momentum/Velocity Shift}}$$
+
